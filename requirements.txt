@@ -1,0 +1,15 @@
+streamlit
+numpy
+pandas
+matplotlib
+seaborn
+tqdm
+scikit-learn
+torch
+torchvision
+librosa
+soundfile
+opencv-python-headless
+split-folders
+Pillow
+    

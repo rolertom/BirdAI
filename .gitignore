@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+.ipynb_checkpoints/
+
+Dataset/
+dataset_for_training/
+dataset_spectrogram/
+train_extended.csv
+
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a

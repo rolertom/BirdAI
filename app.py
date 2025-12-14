@@ -84,21 +84,10 @@ def load_labels():
     if meta_path:
         df = pd.read_csv(meta_path)
 
-        candidate_cols = ["ebird_code", "species", "species_name", "label", "common_name", "scientific_name", "name"]
-        col = next((c for c in candidate_cols if c in df.columns), None)
-        if not col:
-            col = df.columns[0]  
+        col = "ebird_code" if "ebird_code" in df.columns else df.columns[0]
+        labels = sorted(df[col].dropna().astype(str).unique().tolist())
 
-        series = df[col].dropna().astype(str).tolist()
-
-        seen = set()
-        labels = []
-        for x in series:
-            if x not in seen:
-                labels.append(x)
-                seen.add(x)
-
-        return labels, f"Loaded labels from {meta_path} (column: {col}, preserve order)"
+        return labels, f"Loaded labels from {meta_path} (sorted column: {col})"
 
     # 3) dataset_for_training folder
     ds_dir = Path("dataset_for_training")

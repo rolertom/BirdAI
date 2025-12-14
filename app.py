@@ -100,6 +100,12 @@ def load_labels():
     labels = [f"class_{i}" for i in range(20)]
     return labels, "Labels not found → using fallback class_0..class_19"
 
+def write_idx2label_if_missing(labels):
+    out = resolve_path("idx2label.json")
+    if out.exists():
+        return
+    idx2label = {str(i): lab for i, lab in enumerate(labels)}
+    out.write_text(json.dumps(idx2label, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def build_model(num_classes: int):
     """
@@ -114,6 +120,7 @@ def build_model(num_classes: int):
 
 def load_model_and_labels():
     labels, label_msg = load_labels()
+    write_idx2label_if_missing(labels)
     num_classes = len(labels)
 
     model_path = find_first_existing(MODEL_CANDIDATES)
@@ -195,14 +202,14 @@ IMG_TRANSFORM = transforms.Compose(
 
 
 def predict(model, labels, pil_img, topk=5):
-    x = IMG_TRANSFORM(pil_img).unsqueeze(0)  
+    x = IMG_TRANSFORM(pil_img).unsqueeze(0)
     with torch.no_grad():
         logits = model(x)
         probs = torch.softmax(logits, dim=1).squeeze(0)
 
     k = min(topk, probs.numel())
     vals, idxs = torch.topk(probs, k=k)
-    results = [(labels[i], float(v)) for i, v in zip(idxs.tolist(), vals.tolist())]
+    results = [(int(i), labels[int(i)], float(v)) for i, v in zip(idxs.tolist(), vals.tolist())]
     return results
 
 
@@ -276,5 +283,6 @@ if audio_file:
         results = predict(model, labels, pil_img, topk=topk)
 
     st.subheader("Hasil Prediksi")
-    for rank, (name, p) in enumerate(results, start=1):
-        st.write(f"{rank}. **{name}** — {p*100:.2f}%")
+    for rank, (i, name, p) in enumerate(results, 1):
+        st.write(f"{rank}. idx={i} → **{name}** — {p*100:.2f}%")
+

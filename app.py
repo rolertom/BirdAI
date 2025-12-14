@@ -79,22 +79,19 @@ def load_labels():
 
         candidate_cols = ["ebird_code", "species", "species_name", "label", "common_name", "scientific_name", "name"]
         col = next((c for c in candidate_cols if c in df.columns), None)
-        if col:
-            labels = sorted(df[col].dropna().astype(str).unique().tolist())
-            return labels, f"Loaded labels from {meta_path} (column: {col})"
-        else:
-         
-            series = df[col].dropna().astype(str).tolist()
+        if not col:
+            col = df.columns[0]  
 
-            seen = set()
-            labels = []
-            for x in series:
-                if x not in seen:
-                    labels.append(x)
-                    seen.add(x)
+        series = df[col].dropna().astype(str).tolist()
 
-            return labels, f"Loaded labels from {meta_path} (column: {col}, preserve order)"
+        seen = set()
+        labels = []
+        for x in series:
+            if x not in seen:
+                labels.append(x)
+                seen.add(x)
 
+        return labels, f"Loaded labels from {meta_path} (column: {col}, preserve order)"
 
     # 3) dataset_for_training folder
     ds_dir = Path("dataset_for_training")

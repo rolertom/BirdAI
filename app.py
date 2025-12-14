@@ -14,6 +14,7 @@ import cv2
 from PIL import Image
 import pandas as pd
 
+
 # Config
 # =========================
 st.set_page_config(page_title="Bird Species Detector", layout="centered")
@@ -22,7 +23,7 @@ st.title("🦜 Bird Species Detector (Audio)")
 DEFAULT_SR = 32000
 DEFAULT_DURATION = 5.0
 DEFAULT_N_MELS = 128
-DEFAULT_IMG_SIZE = 224
+DEFAULT_IMG_SIZE = 128  
 
 MODEL_CANDIDATES = [
     "models/bird_model.pth",
@@ -140,16 +141,13 @@ def load_model_and_labels():
 
 def audio_to_spectrogram_image(
     audio_bytes: bytes,
+    file_suffix: str = ".wav",
     target_sr: int = DEFAULT_SR,
     duration_sec: float = DEFAULT_DURATION,
     n_mels: int = DEFAULT_N_MELS,
     img_size: int = DEFAULT_IMG_SIZE,
 ):
-    """
-    Convert audio -> mel spectrogram (dB) -> image RGB 224x224.
-    """
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
@@ -161,29 +159,24 @@ def audio_to_spectrogram_image(
         except Exception:
             pass
 
-    # pad/crop
+    y, _ = librosa.effects.trim(y, top_db=20)
+
     target_len = int(target_sr * duration_sec)
     if len(y) < target_len:
         y = np.pad(y, (0, target_len - len(y)))
     else:
         y = y[:target_len]
 
-    # mel spectrogram
-    S = librosa.feature.melspectrogram(y=y, sr=target_sr, n_mels=n_mels, fmax=target_sr // 2)
-    S_db = librosa.power_to_db(S, ref=np.max)
+    melspec = librosa.feature.melspectrogram(
+        y=y, sr=target_sr, n_mels=int(n_mels), fmax=14000
+    )
+    melspec_db = librosa.power_to_db(melspec, ref=np.max)
 
-    # normalize ke 0..255 (uint8)
-    S_norm = S_db - S_db.min()
-    if S_norm.max() > 0:
-        S_norm = S_norm / S_norm.max()
-    img = (S_norm * 255.0).astype(np.uint8)
+    img = (melspec_db - melspec_db.min()) / (melspec_db.max() - melspec_db.min() + 1e-9) * 255.0
+    img = img.astype(np.uint8)
+    img = np.flip(img, axis=0)
 
-    # RGB
-    img_color = cv2.applyColorMap(img, cv2.COLORMAP_MAGMA)
-    img_color = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
-    img_color = cv2.resize(img_color, (img_size, img_size), interpolation=cv2.INTER_AREA)
-
-    pil_img = Image.fromarray(img_color)
+    pil_img = Image.fromarray(img).convert("RGB")
     return pil_img
 
 
@@ -244,8 +237,13 @@ if audio_file:
 
     with st.spinner("Membuat spectrogram & prediksi..."):
         try:
+            suffix = Path(audio_file.name).suffix.lower()
+            if suffix not in [".wav", ".mp3", ".flac", ".ogg", ".m4a"]:
+                suffix = ".wav"
+
             pil_img = audio_to_spectrogram_image(
                 audio_bytes,
+                file_suffix=suffix,
                 target_sr=int(sr),
                 duration_sec=float(duration),
                 n_mels=int(n_mels),

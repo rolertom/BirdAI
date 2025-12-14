@@ -77,15 +77,24 @@ def load_labels():
     if meta_path:
         df = pd.read_csv(meta_path)
 
-        candidate_cols = ["species", "species_name", "label", "common_name", "scientific_name", "name"]
+        candidate_cols = ["ebird_code", "species", "species_name", "label", "common_name", "scientific_name", "name"]
         col = next((c for c in candidate_cols if c in df.columns), None)
         if col:
             labels = sorted(df[col].dropna().astype(str).unique().tolist())
             return labels, f"Loaded labels from {meta_path} (column: {col})"
         else:
          
-            labels = sorted(df.iloc[:, 0].dropna().astype(str).unique().tolist())
-            return labels, f"Loaded labels from {meta_path} (fallback first column)"
+            series = df[col].dropna().astype(str).tolist()
+
+            seen = set()
+            labels = []
+            for x in series:
+                if x not in seen:
+                    labels.append(x)
+                    seen.add(x)
+
+            return labels, f"Loaded labels from {meta_path} (column: {col}, preserve order)"
+
 
     # 3) dataset_for_training folder
     ds_dir = Path("dataset_for_training")
@@ -221,6 +230,13 @@ try:
     model, labels, model_path, label_msg = load_model_and_labels()
     st.caption(f"Model: `{model_path}`")
     st.caption(f"Labels: {label_msg}")
+
+    with st.expander("DEBUG: Labels order", expanded=False):
+        st.write("First 10 labels:", labels[:10])
+        st.write("Index houspa:", labels.index("houspa") if "houspa" in labels else "not found")
+        st.write("Index daejun:", labels.index("daejun") if "daejun" in labels else "not found")
+        st.write("Total classes:", len(labels))
+        
 except Exception as e:
     st.error(str(e))
     st.stop()

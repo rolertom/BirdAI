@@ -14,6 +14,20 @@ import cv2
 from PIL import Image
 import pandas as pd
 
+BASE_DIR = Path(__file__).resolve().parent
+
+def resolve_path(p):
+    p = Path(p)
+    if not p.is_absolute():
+        p = BASE_DIR / p
+    return p
+
+def find_first_existing(paths):
+    for p in paths:
+        rp = resolve_path(p)
+        if rp.exists():
+            return str(rp)
+    return None
 
 # Config
 # =========================
@@ -47,13 +61,6 @@ METADATA_CANDIDATES = [
 # ========================
 # Helpers
 # =========================
-def find_first_existing(paths):
-    for p in paths:
-        if Path(p).exists():
-            return str(p)
-    return None
-
-
 def load_labels():
     """
     Prioritas:
@@ -116,7 +123,6 @@ def build_model(num_classes: int):
     return model
 
 
-@st.cache_resource
 def load_model_and_labels():
     labels, label_msg = load_labels()
     num_classes = len(labels)
@@ -142,7 +148,7 @@ def load_model_and_labels():
         )
 
     model.eval()
-    return model, labels, model_path, label_msg
+    return model, labels, model_path, label_msg         
 
 
 def audio_to_spectrogram_image(
@@ -234,6 +240,11 @@ try:
         st.write("Index daejun:", labels.index("daejun") if "daejun" in labels else "not found")
         st.write("Total classes:", len(labels))
         
+    with st.expander("DEBUG: Paths", expanded=False):
+        st.write("BASE_DIR:", str(BASE_DIR))
+        st.write("label_json found:", find_first_existing(LABEL_CANDIDATES))
+        st.write("meta_csv found:", find_first_existing(METADATA_CANDIDATES))
+    
 except Exception as e:
     st.error(str(e))
     st.stop()

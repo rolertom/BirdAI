@@ -251,9 +251,8 @@ audio_file = st.file_uploader(
 )
 
 if audio_file:
-    st.audio(audio_file)
-
-    audio_bytes = audio_file.read()
+    audio_bytes = audio_file.getvalue()
+    st.audio(audio_bytes)
 
     with st.spinner("Membuat spectrogram & prediksi..."):
         try:

@@ -12,4 +12,4 @@ soundfile
 opencv-python-headless
 split-folders
 Pillow
-    
+geopandas

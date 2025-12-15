@@ -30,6 +30,8 @@ MODEL_PATH = BASE_DIR / "model_effecientnet_final.pth"
 IDX2LABEL_PATH = BASE_DIR / "idx2label.json"
 METADATA_PATH = BASE_DIR / "metadata_top20.csv"
 
+BIRD_IMG_DIR = BASE_DIR / "bird_images"
+BIRD_IMG_EXTS = [".jpg", ".jpeg", ".png", ".webp"]
 
 # ========================
 # model/ckpt
@@ -113,6 +115,15 @@ def load_idx2code_from_json() -> list[str]:
 
     return idx2code
 
+def find_bird_image_path(code: str) -> Path | None:
+    if not BIRD_IMG_DIR.exists():
+        return None
+    code = code.strip()
+    for ext in BIRD_IMG_EXTS:
+        p = BIRD_IMG_DIR / f"{code}{ext}"
+        if p.exists():
+            return p
+    return None
 
 # ========================
 # Load bundle (cached)
@@ -263,8 +274,17 @@ if audio_file:
     for rank, (i, p) in enumerate(zip(idxs, probs), start=1):
         code = idx2code[i]
         full = code_to_full.get(code, "").strip()
-        if full:
-            display_name = f"{full} ({code})"
-        else:
-            display_name = code
-        st.write(f"{rank}. **{display_name}** — {p*100:.2f}%")
+        display_name = f"{full} ({code})" if full else code
+
+        img_path = find_bird_image_path(code)
+
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if img_path:
+                st.image(str(img_path), use_container_width=True)
+            else:
+                st.caption("No image")
+
+        with col2:
+            st.write(f"{rank}. **{display_name}** — {p*100:.2f}%")
+

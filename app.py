@@ -30,7 +30,6 @@ MODEL_CANDIDATES = [
     "models/bird_model.pth",
     "model_effecientnet_final.pth",       
     "models/model_effecientnet_final.pth",
-    "models/model_efficientnet_final.pth",
 ]
 
 LABEL_JSON_CANDIDATES = [

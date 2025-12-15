@@ -5,17 +5,17 @@ from pathlib import Path
 
 import streamlit as st
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
-
 import librosa
 from PIL import Image
-import pandas as pd
 
-# ========================
+
+# =========================
 # App config
-# ========================
+# =========================
 st.set_page_config(page_title="Bird Species Detector", layout="centered")
 st.title("🦜 Bird Species Detector (Audio)")
 
@@ -28,11 +28,15 @@ DEFAULT_IMG_SIZE = 128
 
 MODEL_CANDIDATES = [
     "models/bird_model.pth",
-    "model_effecientnet_final.pth",       
+    "model_effecientnet_final.pth",
+    "model_efficientnet_final.pth",
+    "model_effecientnet_final.pth",
+    "model_efficientnet_final.pth",
     "models/model_effecientnet_final.pth",
+    "models/model_efficientnet_final.pth",
 ]
 
-LABEL_JSON_CANDIDATES = [
+IDX2LABEL_CANDIDATES = [
     "models/idx2label.json",
     "idx2label.json",
 ]
@@ -43,15 +47,15 @@ METADATA_CANDIDATES = [
 ]
 
 
-# =======================
-# Helpers
-# ========================
+# =========================
+# Helpers: paths & IO
+# =========================
 def resolve_path(p: str) -> Path:
-    p = Path(p)
-    return p if p.is_absolute() else (BASE_DIR / p)
+    pp = Path(p)
+    return pp if pp.is_absolute() else (BASE_DIR / pp)
 
 
-def find_first_existing(paths) -> str | None:
+def find_first_existing(paths: list[str]) -> str | None:
     for p in paths:
         rp = resolve_path(p)
         if rp.exists():
@@ -59,60 +63,112 @@ def find_first_existing(paths) -> str | None:
     return None
 
 
-def load_labels_and_names():
+def _strip_module_prefix(state: dict) -> dict:
+    # handle DDP-trained checkpoints
+    if not state:
+        return state
+    if any(k.startswith("module.") for k in state.keys()):
+        return {k.replace("module.", "", 1): v for k, v in state.items()}
+    return state
+
+
+def _unwrap_checkpoint(obj):
+    # try common wrappers
+    if isinstance(obj, dict):
+        for k in ("state_dict", "model_state_dict", "model", "net"):
+            if k in obj and isinstance(obj[k], dict):
+                return obj[k]
+    return obj
+
+
+def infer_num_classes_from_state(state: dict) -> int | None:
+    # EfficientNet-B0 classifier is usually classifier.1
+    for key in ("classifier.1.weight", "classifier.weight", "fc.weight"):
+        if key in state and hasattr(state[key], "shape"):
+            return int(state[key].shape[0])
+    # fallback: find any 2D weight with out_features == number of classes
+    for k, v in state.items():
+        if k.endswith("classifier.1.weight") and hasattr(v, "shape"):
+            return int(v.shape[0])
+    return None
+
+
+def load_metadata_maps():
+    """Return:
+    - code_to_full: ebird_code -> pretty full_name
     """
-    FIX UTAMA:
-    - Saat training, class diurut alfabetis berdasarkan FULL NAME (nama folder/full_name),
-      bukan berdasarkan ebird_code.
-    - Jadi di sini labels harus dibuat dengan order yang sama:
-        sort metadata_top20.csv berdasarkan kolom full_name,
-        lalu labels = list ebird_code sesuai urutan tersebut.
-    - Output ditampilkan pakai FULL NAME (bukan ebird_code).
+    meta_path = find_first_existing(METADATA_CANDIDATES)
+    code_to_full: dict[str, str] = {}
+    if not meta_path:
+        return code_to_full
+
+    df = pd.read_csv(meta_path)
+    if "ebird_code" not in df.columns:
+        return code_to_full
+
+    full_col = "full_name" if "full_name" in df.columns else None
+    for _, row in df.iterrows():
+        code = str(row["ebird_code"])
+        full = str(row[full_col]) if full_col and pd.notna(row[full_col]) else ""
+        full = full.strip()
+        if full:
+            # make it nicer for display
+            full = full.replace("_", " ").strip()
+        code_to_full[code] = full
+
+    return code_to_full
+
+
+def load_idx2code(num_classes: int) -> list[str]:
     """
+    idx -> ebird_code (HARUS urut sama dengan saat training).
+    Prioritas:
+      1) idx2label.json (paling aman)
+      2) fallback dari metadata_top20.csv: urut berdasarkan full_name (kalau ada), tapi tetap pastikan panjang = num_classes
+    """
+    json_path = find_first_existing(IDX2LABEL_CANDIDATES)
+    if json_path:
+        with open(json_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        # keys bisa string angka
+        pairs = sorted(((int(k), str(v)) for k, v in raw.items()), key=lambda x: x[0])
+        idx2 = [v for _, v in pairs]
+
+        # pastikan panjang sama dengan num_classes (checkpoint)
+        if len(idx2) < num_classes:
+            idx2 += [f"class_{i}" for i in range(len(idx2), num_classes)]
+        elif len(idx2) > num_classes:
+            idx2 = idx2[:num_classes]
+        return idx2
+
+    # --- fallback: metadata ---
     meta_path = find_first_existing(METADATA_CANDIDATES)
     if meta_path:
         df = pd.read_csv(meta_path)
+        if "ebird_code" in df.columns:
+            full_col = "full_name" if "full_name" in df.columns else None
+            rows = []
+            for _, r in df.iterrows():
+                code = str(r["ebird_code"])
+                full = ""
+                if full_col and pd.notna(r[full_col]):
+                    full = str(r[full_col]).strip()
+                sort_key = full if full else code
+                rows.append((sort_key, code))
+            rows.sort(key=lambda x: x[0])
+            idx2 = [code for _, code in rows]
 
-        code_col = next((c for c in ["ebird_code", "code", "label"] if c in df.columns), None)
-        name_col = next((c for c in ["full_name", "fullName", "species_name", "species", "name"] if c in df.columns), None)
+            if len(idx2) < num_classes:
+                idx2 += [f"class_{i}" for i in range(len(idx2), num_classes)]
+            elif len(idx2) > num_classes:
+                idx2 = idx2[:num_classes]
+            return idx2
 
-        if not code_col:
-            raise ValueError(
-                f"metadata CSV ditemukan ({meta_path}) tapi kolom ebird_code tidak ada. "
-                f"Kolom tersedia: {list(df.columns)}"
-            )
-        if not name_col:
-            name_col = code_col
-
-        df = df[[code_col, name_col]].dropna()
-        df[code_col] = df[code_col].astype(str).str.strip()
-        df[name_col] = df[name_col].astype(str).str.strip()
-
-        df = df.drop_duplicates(subset=[code_col], keep="first")
-
-        df = df.sort_values(by=name_col, key=lambda s: s.str.lower(), kind="mergesort")
-
-        labels = df[code_col].tolist()
-        code_to_full = dict(zip(df[code_col], df[name_col]))
-
-        return labels, code_to_full, f"metadata_top20.csv (sorted by {name_col})"
-
-    # fallback: idx2label.json (kalau metadata tidak ada)
-    label_path = find_first_existing(LABEL_JSON_CANDIDATES)
-    if label_path:
-        with open(label_path, "r", encoding="utf-8") as f:
-            idx2label = json.load(f)
-        items = sorted(((int(k), v) for k, v in idx2label.items()), key=lambda x: x[0])
-        labels = [str(v) for _, v in items]
-        code_to_full = {c: c for c in labels}
-        return labels, code_to_full, "idx2label.json"
-
-    labels = [f"class_{i}" for i in range(20)]
-    code_to_full = {c: c for c in labels}
-    return labels, code_to_full, "fallback class_0..class_19"
+    return [f"class_{i}" for i in range(num_classes)]
 
 
-def build_model(num_classes: int) -> nn.Module:
+def build_model(num_classes: int):
     model = models.efficientnet_b0(weights=None)
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
@@ -121,53 +177,47 @@ def build_model(num_classes: int) -> nn.Module:
 
 @st.cache_resource
 def load_model_bundle():
-    labels, code_to_full, label_source = load_labels_and_names()
-    num_classes = len(labels)
-
     model_path = find_first_existing(MODEL_CANDIDATES)
     if not model_path:
-        raise FileNotFoundError(
-            "File model .pth tidak ditemukan. Taruh file di salah satu path ini:\n"
-            + "\n".join([f"- {p}" for p in MODEL_CANDIDATES])
-        )
+        raise FileNotFoundError("Model file tidak ditemukan. Pastikan .pth ada di repo (atau folder models/).")
+
+    ckpt = torch.load(model_path, map_location="cpu")
+    state = _unwrap_checkpoint(ckpt)
+    if not isinstance(state, dict):
+        raise RuntimeError("Checkpoint model tidak berbentuk state_dict yang valid.")
+
+    state = _strip_module_prefix(state)
+
+    num_classes = infer_num_classes_from_state(state)
+    if num_classes is None:
+        raise RuntimeError("Gagal mendeteksi jumlah kelas dari checkpoint (state_dict).")
+
+    idx2code = load_idx2code(num_classes)
+    code_to_full = load_metadata_maps()
 
     model = build_model(num_classes)
-
-    try:
-        state = torch.load(model_path, map_location="cpu")
-    except Exception as e:
-        raise RuntimeError(
-            f"Gagal membaca file model: {model_path}\n"
-            f"Detail: {e}\n\n"
-            "Kalau muncul 'PytorchStreamReader failed reading zip archive', biasanya file .pth corrupt / salah file."
-        )
-
-    try:
-        model.load_state_dict(state, strict=True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Gagal load state_dict dari {model_path}.\n"
-            f"Biasanya karena num_classes / arsitektur tidak sama seperti saat training.\n\n"
-            f"Detail error: {e}"
-        )
-
+    model.load_state_dict(state, strict=True)
     model.eval()
-    return model, labels, code_to_full, model_path, label_source
+
+    return model, idx2code, code_to_full, model_path
 
 
+# =========================
+# Audio -> spectrogram image
+# =========================
 def audio_to_spectrogram_image(
     audio_bytes: bytes,
-    file_suffix: str = ".wav",
-    target_sr: int = DEFAULT_SR,
-    duration_sec: float = DEFAULT_DURATION,
-    n_mels: int = DEFAULT_N_MELS,
-) -> Image.Image:
+    file_suffix: str,
+    target_sr: int,
+    duration_sec: float,
+    n_mels: int,
+):
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
     try:
-        y, _sr = librosa.load(tmp_path, sr=target_sr, mono=True)
+        y, _ = librosa.load(tmp_path, sr=target_sr, mono=True)
     finally:
         try:
             os.remove(tmp_path)
@@ -186,7 +236,8 @@ def audio_to_spectrogram_image(
     melspec_db = librosa.power_to_db(melspec, ref=np.max)
 
     img = (melspec_db - melspec_db.min()) / (melspec_db.max() - melspec_db.min() + 1e-9) * 255.0
-    img = np.flip(img.astype(np.uint8), axis=0) 
+    img = img.astype(np.uint8)
+    img = np.flip(img, axis=0)
 
     return Image.fromarray(img).convert("RGB")
 
@@ -200,14 +251,15 @@ IMG_TRANSFORM = transforms.Compose(
 )
 
 
-def predict_topk(model: nn.Module, labels: list[str], pil_img: Image.Image, topk: int = 5):
-    x = IMG_TRANSFORM(pil_img).unsqueeze(0)
+def predict_topk(model, x_img: Image.Image, topk: int):
+    x = IMG_TRANSFORM(x_img).unsqueeze(0)
     with torch.no_grad():
-        probs = torch.softmax(model(x), dim=1).squeeze(0)
+        logits = model(x)
+        probs = torch.softmax(logits, dim=1).squeeze(0)
 
     k = min(int(topk), probs.numel())
     vals, idxs = torch.topk(probs, k=k)
-    return [(labels[i], float(v)) for i, v in zip(idxs.tolist(), vals.tolist())]
+    return idxs.tolist(), vals.tolist()
 
 
 # =========================
@@ -223,49 +275,46 @@ with st.expander("Settings", expanded=True):
 st.divider()
 
 try:
-    model, labels, code_to_full, model_path, label_source = load_model_bundle()
-    st.caption(f"Model: `{Path(model_path).name}`")
-    st.caption(f"Label source: {label_source}")
+    model, idx2code, code_to_full, model_path = load_model_bundle()
+    st.caption(f"Model: `{Path(model_path).name}` | classes: {len(idx2code)}")
 except Exception as e:
     st.error(str(e))
     st.stop()
 
-audio_file = st.file_uploader(
-    "Upload audio (wav/mp3/flac/ogg/m4a)",
-    type=["wav", "mp3", "flac", "ogg", "m4a"],
-)
+audio_file = st.file_uploader("Upload audio (wav/mp3/flac/ogg/m4a)", type=["wav", "mp3", "flac", "ogg", "m4a"])
 
 if audio_file:
     st.audio(audio_file)
     audio_bytes = audio_file.getvalue()
 
     with st.spinner("Membuat spectrogram & prediksi..."):
-        try:
-            suffix = Path(audio_file.name).suffix.lower()
-            if suffix not in [".wav", ".mp3", ".flac", ".ogg", ".m4a"]:
-                suffix = ".wav"
+        suffix = Path(audio_file.name).suffix.lower()
+        if suffix not in [".wav", ".mp3", ".flac", ".ogg", ".m4a"]:
+            suffix = ".wav"
 
+        try:
             pil_img = audio_to_spectrogram_image(
-                audio_bytes,
+                audio_bytes=audio_bytes,
                 file_suffix=suffix,
                 target_sr=int(sr),
                 duration_sec=float(duration),
                 n_mels=int(n_mels),
             )
         except Exception as e:
-            st.error(
-                "Gagal membaca audio atau membuat spectrogram.\n"
-                "Coba upload format WAV (paling aman) atau pastikan file tidak corrupt.\n\n"
-                f"Detail: {e}"
-            )
+            st.error(f"Gagal membaca audio / membuat spectrogram.\n\nDetail: {e}")
             st.stop()
 
         if show_spec:
             st.image(pil_img, caption="Spectrogram (Mel)", use_container_width=True)
 
-        results = predict_topk(model, labels, pil_img, topk=topk)
+        idxs, probs = predict_topk(model, pil_img, topk=topk)
 
     st.subheader("Hasil Prediksi")
-    for rank, (code, p) in enumerate(results, start=1):
-        full_name = code_to_full.get(code, code)
-        st.write(f"{rank}. **{full_name}** — {p*100:.2f}%")
+    for rank, (i, p) in enumerate(zip(idxs, probs), start=1):
+        code = idx2code[i] if 0 <= i < len(idx2code) else f"class_{i}"
+        full = code_to_full.get(code, "")
+        display_name = full if full else code
+        # kalau full_name ada, tampilkan (ebird_code) biar jelas
+        if full:
+            display_name = f"{full} ({code})"
+        st.write(f"{rank}. **{display_name}** — {p*100:.2f}%")

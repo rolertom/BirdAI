@@ -26,45 +26,15 @@ DEFAULT_DURATION = 5.0
 DEFAULT_N_MELS = 128
 DEFAULT_IMG_SIZE = 128
 
-MODEL_CANDIDATES = [
-    "models/bird_model.pth",
-    "model_effecientnet_final.pth",
-    "model_efficientnet_final.pth",
-    "model_effecientnet_final.pth",
-    "model_efficientnet_final.pth",
-    "models/model_effecientnet_final.pth",
-    "models/model_efficientnet_final.pth",
-]
-
-IDX2LABEL_CANDIDATES = [
-    "models/idx2label.json",
-    "idx2label.json",
-]
-
-METADATA_CANDIDATES = [
-    "metadata_top20.csv",
-    "models/metadata_top20.csv",
-]
+MODEL_PATH = BASE_DIR / "model_effecientnet_final.pth"
+IDX2LABEL_PATH = BASE_DIR / "idx2label.json"
+METADATA_PATH = BASE_DIR / "metadata_top20.csv"
 
 
+# ========================
+# model/ckpt
 # =========================
-# Helpers: paths & IO
-# =========================
-def resolve_path(p: str) -> Path:
-    pp = Path(p)
-    return pp if pp.is_absolute() else (BASE_DIR / pp)
-
-
-def find_first_existing(paths: list[str]) -> str | None:
-    for p in paths:
-        rp = resolve_path(p)
-        if rp.exists():
-            return str(rp)
-    return None
-
-
 def _strip_module_prefix(state: dict) -> dict:
-    # handle DDP-trained checkpoints
     if not state:
         return state
     if any(k.startswith("module.") for k in state.keys()):
@@ -73,7 +43,6 @@ def _strip_module_prefix(state: dict) -> dict:
 
 
 def _unwrap_checkpoint(obj):
-    # try common wrappers
     if isinstance(obj, dict):
         for k in ("state_dict", "model_state_dict", "model", "net"):
             if k in obj and isinstance(obj[k], dict):
@@ -82,90 +51,10 @@ def _unwrap_checkpoint(obj):
 
 
 def infer_num_classes_from_state(state: dict) -> int | None:
-    # EfficientNet-B0 classifier is usually classifier.1
     for key in ("classifier.1.weight", "classifier.weight", "fc.weight"):
         if key in state and hasattr(state[key], "shape"):
             return int(state[key].shape[0])
-    # fallback: find any 2D weight with out_features == number of classes
-    for k, v in state.items():
-        if k.endswith("classifier.1.weight") and hasattr(v, "shape"):
-            return int(v.shape[0])
     return None
-
-
-def load_metadata_maps():
-    """Return:
-    - code_to_full: ebird_code -> pretty full_name
-    """
-    meta_path = find_first_existing(METADATA_CANDIDATES)
-    code_to_full: dict[str, str] = {}
-    if not meta_path:
-        return code_to_full
-
-    df = pd.read_csv(meta_path)
-    if "ebird_code" not in df.columns:
-        return code_to_full
-
-    full_col = "full_name" if "full_name" in df.columns else None
-    for _, row in df.iterrows():
-        code = str(row["ebird_code"])
-        full = str(row[full_col]) if full_col and pd.notna(row[full_col]) else ""
-        full = full.strip()
-        if full:
-            # make it nicer for display
-            full = full.replace("_", " ").strip()
-        code_to_full[code] = full
-
-    return code_to_full
-
-
-def load_idx2code(num_classes: int) -> list[str]:
-    """
-    idx -> ebird_code (HARUS urut sama dengan saat training).
-    Prioritas:
-      1) idx2label.json (paling aman)
-      2) fallback dari metadata_top20.csv: urut berdasarkan full_name (kalau ada), tapi tetap pastikan panjang = num_classes
-    """
-    json_path = find_first_existing(IDX2LABEL_CANDIDATES)
-    if json_path:
-        with open(json_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-
-        # keys bisa string angka
-        pairs = sorted(((int(k), str(v)) for k, v in raw.items()), key=lambda x: x[0])
-        idx2 = [v for _, v in pairs]
-
-        # pastikan panjang sama dengan num_classes (checkpoint)
-        if len(idx2) < num_classes:
-            idx2 += [f"class_{i}" for i in range(len(idx2), num_classes)]
-        elif len(idx2) > num_classes:
-            idx2 = idx2[:num_classes]
-        return idx2
-
-    # --- fallback: metadata ---
-    meta_path = find_first_existing(METADATA_CANDIDATES)
-    if meta_path:
-        df = pd.read_csv(meta_path)
-        if "ebird_code" in df.columns:
-            full_col = "full_name" if "full_name" in df.columns else None
-            rows = []
-            for _, r in df.iterrows():
-                code = str(r["ebird_code"])
-                full = ""
-                if full_col and pd.notna(r[full_col]):
-                    full = str(r[full_col]).strip()
-                sort_key = full if full else code
-                rows.append((sort_key, code))
-            rows.sort(key=lambda x: x[0])
-            idx2 = [code for _, code in rows]
-
-            if len(idx2) < num_classes:
-                idx2 += [f"class_{i}" for i in range(len(idx2), num_classes)]
-            elif len(idx2) > num_classes:
-                idx2 = idx2[:num_classes]
-            return idx2
-
-    return [f"class_{i}" for i in range(num_classes)]
 
 
 def build_model(num_classes: int):
@@ -175,31 +64,92 @@ def build_model(num_classes: int):
     return model
 
 
+# =========================
+# labels & metadata
+# =========================
+def load_code_to_fullname() -> dict[str, str]:
+
+    code_to_full: dict[str, str] = {}
+
+    if not METADATA_PATH.exists():
+        return code_to_full
+
+    df = pd.read_csv(METADATA_PATH)
+    if "ebird_code" not in df.columns:
+        return code_to_full
+
+    full_col = "full_name" if "full_name" in df.columns else None
+
+    for _, row in df.iterrows():
+        code = str(row["ebird_code"]).strip()
+        if not code:
+            continue
+
+        full = ""
+        if full_col and pd.notna(row[full_col]):
+            full = str(row[full_col]).strip()
+
+        if full:
+            full = full.replace("_", " ").strip()
+
+        code_to_full[code] = full
+
+    return code_to_full
+
+
+def load_idx2code_from_json() -> list[str]:
+
+    if not IDX2LABEL_PATH.exists():
+        raise FileNotFoundError(f"idx2label.json tidak ketemu: {IDX2LABEL_PATH}")
+
+    with open(IDX2LABEL_PATH, "r", encoding="utf-8") as f:
+        idx2label = json.load(f)
+
+    items = sorted(((int(k), str(v).strip()) for k, v in idx2label.items()), key=lambda x: x[0])
+    idx2code = [v for _, v in items]
+
+    if not idx2code or any(x == "" for x in idx2code):
+        raise RuntimeError("idx2label.json ada yang kosong / format tidak valid.")
+
+    return idx2code
+
+
+# ========================
+# Load bundle (cached)
+# =========================
 @st.cache_resource
 def load_model_bundle():
-    model_path = find_first_existing(MODEL_CANDIDATES)
-    if not model_path:
-        raise FileNotFoundError("Model file tidak ditemukan. Pastikan .pth ada di repo (atau folder models/).")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Model .pth tidak ketemu: {MODEL_PATH}")
 
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(MODEL_PATH, map_location="cpu")
     state = _unwrap_checkpoint(ckpt)
     if not isinstance(state, dict):
         raise RuntimeError("Checkpoint model tidak berbentuk state_dict yang valid.")
-
     state = _strip_module_prefix(state)
 
     num_classes = infer_num_classes_from_state(state)
     if num_classes is None:
         raise RuntimeError("Gagal mendeteksi jumlah kelas dari checkpoint (state_dict).")
 
-    idx2code = load_idx2code(num_classes)
-    code_to_full = load_metadata_maps()
+    idx2code = load_idx2code_from_json()
+
+    # pastikan jumlah kelas model = jumlah label
+    if len(idx2code) != num_classes:
+        raise RuntimeError(
+            f"Jumlah kelas tidak match:\n"
+            f"- dari model checkpoint: {num_classes}\n"
+            f"- dari idx2label.json: {len(idx2code)}\n\n"
+            f"Ini harus sama biar mapping label tidak ngaco."
+        )
+
+    code_to_full = load_code_to_fullname()
 
     model = build_model(num_classes)
     model.load_state_dict(state, strict=True)
     model.eval()
 
-    return model, idx2code, code_to_full, model_path
+    return model, idx2code, code_to_full
 
 
 # =========================
@@ -275,8 +225,8 @@ with st.expander("Settings", expanded=True):
 st.divider()
 
 try:
-    model, idx2code, code_to_full, model_path = load_model_bundle()
-    st.caption(f"Model: `{Path(model_path).name}` | classes: {len(idx2code)}")
+    model, idx2code, code_to_full = load_model_bundle()
+    st.caption(f"Loaded: {MODEL_PATH.name} | classes: {len(idx2code)}")
 except Exception as e:
     st.error(str(e))
     st.stop()
@@ -311,10 +261,10 @@ if audio_file:
 
     st.subheader("Hasil Prediksi")
     for rank, (i, p) in enumerate(zip(idxs, probs), start=1):
-        code = idx2code[i] if 0 <= i < len(idx2code) else f"class_{i}"
-        full = code_to_full.get(code, "")
-        display_name = full if full else code
-        # kalau full_name ada, tampilkan (ebird_code) biar jelas
+        code = idx2code[i]
+        full = code_to_full.get(code, "").strip()
         if full:
             display_name = f"{full} ({code})"
+        else:
+            display_name = code
         st.write(f"{rank}. **{display_name}** — {p*100:.2f}%")

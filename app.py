@@ -10,44 +10,30 @@ import torch.nn as nn
 from torchvision import models, transforms
 
 import librosa
-import cv2
 from PIL import Image
 import pandas as pd
 
-BASE_DIR = Path(__file__).resolve().parent
-
-def resolve_path(p):
-    p = Path(p)
-    if not p.is_absolute():
-        p = BASE_DIR / p
-    return p
-
-def find_first_existing(paths):
-    for p in paths:
-        rp = resolve_path(p)
-        if rp.exists():
-            return str(rp)
-    return None
-
-# Config
-# =========================
+# ========================
+# App config
+# ========================
 st.set_page_config(page_title="Bird Species Detector", layout="centered")
 st.title("🦜 Bird Species Detector (Audio)")
+
+BASE_DIR = Path(__file__).resolve().parent
 
 DEFAULT_SR = 32000
 DEFAULT_DURATION = 5.0
 DEFAULT_N_MELS = 128
-DEFAULT_IMG_SIZE = 128  
+DEFAULT_IMG_SIZE = 128
 
 MODEL_CANDIDATES = [
     "models/bird_model.pth",
-    "model_effecientnet_final.pth",  
-    "model_efficientnet_final.pth",
+    "model_effecientnet_final.pth",       
     "models/model_effecientnet_final.pth",
     "models/model_efficientnet_final.pth",
 ]
 
-LABEL_CANDIDATES = [
+LABEL_JSON_CANDIDATES = [
     "models/idx2label.json",
     "idx2label.json",
 ]
@@ -58,69 +44,85 @@ METADATA_CANDIDATES = [
 ]
 
 
-# ========================
+# =======================
 # Helpers
-# =========================
-def load_labels():
-    """
-    Prioritas:
-    1) idx2label.json (idx -> label)
-    2) metadata_top20.csv (ambil kolom yang paling masuk akal)
-    3) folder dataset_for_training (nama subfolder)
-    4) fallback: class_0..class_n
-    """
-    # 1) idx2label.json
-    label_path = find_first_existing(LABEL_CANDIDATES)
-    if label_path:
-        with open(label_path, "r", encoding="utf-8") as f:
-            idx2label = json.load(f)
+# ========================
+def resolve_path(p: str) -> Path:
+    p = Path(p)
+    return p if p.is_absolute() else (BASE_DIR / p)
 
-        items = sorted(((int(k), v) for k, v in idx2label.items()), key=lambda x: x[0])
-        labels = [str(v) for _, v in items]
-        return labels, f"Loaded labels from {label_path}"
 
-    # 2) metadata csv
+def find_first_existing(paths) -> str | None:
+    for p in paths:
+        rp = resolve_path(p)
+        if rp.exists():
+            return str(rp)
+    return None
+
+
+def load_labels_and_names():
+    """
+    FIX UTAMA:
+    - Saat training, class diurut alfabetis berdasarkan FULL NAME (nama folder/full_name),
+      bukan berdasarkan ebird_code.
+    - Jadi di sini labels harus dibuat dengan order yang sama:
+        sort metadata_top20.csv berdasarkan kolom full_name,
+        lalu labels = list ebird_code sesuai urutan tersebut.
+    - Output ditampilkan pakai FULL NAME (bukan ebird_code).
+    """
     meta_path = find_first_existing(METADATA_CANDIDATES)
     if meta_path:
         df = pd.read_csv(meta_path)
 
-        col = "ebird_code" if "ebird_code" in df.columns else df.columns[0]
-        labels = sorted(df[col].dropna().astype(str).unique().tolist())
+        code_col = next((c for c in ["ebird_code", "code", "label"] if c in df.columns), None)
+        name_col = next((c for c in ["full_name", "fullName", "species_name", "species", "name"] if c in df.columns), None)
 
-        return labels, f"Loaded labels from {meta_path} (sorted column: {col})"
+        if not code_col:
+            raise ValueError(
+                f"metadata CSV ditemukan ({meta_path}) tapi kolom ebird_code tidak ada. "
+                f"Kolom tersedia: {list(df.columns)}"
+            )
+        if not name_col:
+            name_col = code_col
 
-    # 3) dataset_for_training folder
-    ds_dir = Path("dataset_for_training")
-    if ds_dir.exists() and ds_dir.is_dir():
-        labels = sorted([p.name for p in ds_dir.iterdir() if p.is_dir()])
-        if labels:
-            return labels, "Loaded labels from dataset_for_training/ subfolders"
+        df = df[[code_col, name_col]].dropna()
+        df[code_col] = df[code_col].astype(str).str.strip()
+        df[name_col] = df[name_col].astype(str).str.strip()
 
-    # 4) fallback
+        df = df.drop_duplicates(subset=[code_col], keep="first")
+
+        df = df.sort_values(by=name_col, key=lambda s: s.str.lower(), kind="mergesort")
+
+        labels = df[code_col].tolist()
+        code_to_full = dict(zip(df[code_col], df[name_col]))
+
+        return labels, code_to_full, f"metadata_top20.csv (sorted by {name_col})"
+
+    # fallback: idx2label.json (kalau metadata tidak ada)
+    label_path = find_first_existing(LABEL_JSON_CANDIDATES)
+    if label_path:
+        with open(label_path, "r", encoding="utf-8") as f:
+            idx2label = json.load(f)
+        items = sorted(((int(k), v) for k, v in idx2label.items()), key=lambda x: x[0])
+        labels = [str(v) for _, v in items]
+        code_to_full = {c: c for c in labels}
+        return labels, code_to_full, "idx2label.json"
+
     labels = [f"class_{i}" for i in range(20)]
-    return labels, "Labels not found → using fallback class_0..class_19"
+    code_to_full = {c: c for c in labels}
+    return labels, code_to_full, "fallback class_0..class_19"
 
-def write_idx2label_if_missing(labels):
-    out = resolve_path("idx2label.json")
-    if out.exists():
-        return
-    idx2label = {str(i): lab for i, lab in enumerate(labels)}
-    out.write_text(json.dumps(idx2label, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def build_model(num_classes: int):
-    """
-    EfficientNet-B0 dengan classifier diganti sesuai jumlah kelas.
-    """
+def build_model(num_classes: int) -> nn.Module:
     model = models.efficientnet_b0(weights=None)
-
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
     return model
 
 
-def load_model_and_labels():
-    labels, label_msg = load_labels()
-    write_idx2label_if_missing(labels)
+@st.cache_resource
+def load_model_bundle():
+    labels, code_to_full, label_source = load_labels_and_names()
     num_classes = len(labels)
 
     model_path = find_first_existing(MODEL_CANDIDATES)
@@ -131,20 +133,27 @@ def load_model_and_labels():
         )
 
     model = build_model(num_classes)
-    state = torch.load(model_path, map_location="cpu")
+
+    try:
+        state = torch.load(model_path, map_location="cpu")
+    except Exception as e:
+        raise RuntimeError(
+            f"Gagal membaca file model: {model_path}\n"
+            f"Detail: {e}\n\n"
+            "Kalau muncul 'PytorchStreamReader failed reading zip archive', biasanya file .pth corrupt / salah file."
+        )
 
     try:
         model.load_state_dict(state, strict=True)
     except Exception as e:
-    
         raise RuntimeError(
             f"Gagal load state_dict dari {model_path}.\n"
-            f"Biasanya karena arsitektur/num_classes tidak sama dengan saat training.\n\n"
+            f"Biasanya karena num_classes / arsitektur tidak sama seperti saat training.\n\n"
             f"Detail error: {e}"
         )
 
     model.eval()
-    return model, labels, model_path, label_msg         
+    return model, labels, code_to_full, model_path, label_source
 
 
 def audio_to_spectrogram_image(
@@ -153,14 +162,13 @@ def audio_to_spectrogram_image(
     target_sr: int = DEFAULT_SR,
     duration_sec: float = DEFAULT_DURATION,
     n_mels: int = DEFAULT_N_MELS,
-    img_size: int = DEFAULT_IMG_SIZE,
-):
+) -> Image.Image:
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
     try:
-        y, sr = librosa.load(tmp_path, sr=target_sr, mono=True)
+        y, _sr = librosa.load(tmp_path, sr=target_sr, mono=True)
     finally:
         try:
             os.remove(tmp_path)
@@ -175,42 +183,32 @@ def audio_to_spectrogram_image(
     else:
         y = y[:target_len]
 
-    melspec = librosa.feature.melspectrogram(
-        y=y, sr=target_sr, n_mels=int(n_mels), fmax=14000
-    )
+    melspec = librosa.feature.melspectrogram(y=y, sr=target_sr, n_mels=int(n_mels), fmax=14000)
     melspec_db = librosa.power_to_db(melspec, ref=np.max)
 
     img = (melspec_db - melspec_db.min()) / (melspec_db.max() - melspec_db.min() + 1e-9) * 255.0
-    img = img.astype(np.uint8)
-    img = np.flip(img, axis=0)
+    img = np.flip(img.astype(np.uint8), axis=0) 
 
-    pil_img = Image.fromarray(img).convert("RGB")
-    return pil_img
+    return Image.fromarray(img).convert("RGB")
 
 
-# torchvision transform (ImageNet normalization)
 IMG_TRANSFORM = transforms.Compose(
     [
         transforms.Resize((DEFAULT_IMG_SIZE, DEFAULT_IMG_SIZE)),
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
 )
 
 
-def predict(model, labels, pil_img, topk=5):
+def predict_topk(model: nn.Module, labels: list[str], pil_img: Image.Image, topk: int = 5):
     x = IMG_TRANSFORM(pil_img).unsqueeze(0)
     with torch.no_grad():
-        logits = model(x)
-        probs = torch.softmax(logits, dim=1).squeeze(0)
+        probs = torch.softmax(model(x), dim=1).squeeze(0)
 
-    k = min(topk, probs.numel())
+    k = min(int(topk), probs.numel())
     vals, idxs = torch.topk(probs, k=k)
-    results = [(int(i), labels[int(i)], float(v)) for i, v in zip(idxs.tolist(), vals.tolist())]
-    return results
+    return [(labels[i], float(v)) for i, v in zip(idxs.tolist(), vals.tolist())]
 
 
 # =========================
@@ -226,21 +224,9 @@ with st.expander("Settings", expanded=True):
 st.divider()
 
 try:
-    model, labels, model_path, label_msg = load_model_and_labels()
-    st.caption(f"Model: `{model_path}`")
-    st.caption(f"Labels: {label_msg}")
-
-    with st.expander("DEBUG: Labels order", expanded=False):
-        st.write("First 10 labels:", labels[:10])
-        st.write("Index houspa:", labels.index("houspa") if "houspa" in labels else "not found")
-        st.write("Index daejun:", labels.index("daejun") if "daejun" in labels else "not found")
-        st.write("Total classes:", len(labels))
-        
-    with st.expander("DEBUG: Paths", expanded=False):
-        st.write("BASE_DIR:", str(BASE_DIR))
-        st.write("label_json found:", find_first_existing(LABEL_CANDIDATES))
-        st.write("meta_csv found:", find_first_existing(METADATA_CANDIDATES))
-    
+    model, labels, code_to_full, model_path, label_source = load_model_bundle()
+    st.caption(f"Model: `{Path(model_path).name}`")
+    st.caption(f"Label source: {label_source}")
 except Exception as e:
     st.error(str(e))
     st.stop()
@@ -251,8 +237,8 @@ audio_file = st.file_uploader(
 )
 
 if audio_file:
+    st.audio(audio_file)
     audio_bytes = audio_file.getvalue()
-    st.audio(audio_bytes)
 
     with st.spinner("Membuat spectrogram & prediksi..."):
         try:
@@ -266,7 +252,6 @@ if audio_file:
                 target_sr=int(sr),
                 duration_sec=float(duration),
                 n_mels=int(n_mels),
-                img_size=DEFAULT_IMG_SIZE,
             )
         except Exception as e:
             st.error(
@@ -279,9 +264,9 @@ if audio_file:
         if show_spec:
             st.image(pil_img, caption="Spectrogram (Mel)", use_container_width=True)
 
-        results = predict(model, labels, pil_img, topk=topk)
+        results = predict_topk(model, labels, pil_img, topk=topk)
 
     st.subheader("Hasil Prediksi")
-    for rank, (i, name, p) in enumerate(results, 1):
-        st.write(f"{rank}. idx={i} → **{name}** — {p*100:.2f}%")
-
+    for rank, (code, p) in enumerate(results, start=1):
+        full_name = code_to_full.get(code, code)
+        st.write(f"{rank}. **{full_name}** — {p*100:.2f}%")

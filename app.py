@@ -227,11 +227,9 @@ def predict_topk(model, x_img: Image.Image, topk: int):
 # UI
 # =========================
 with st.expander("Settings", expanded=True):
-    sr = st.number_input("Sample rate", min_value=8000, max_value=96000, value=DEFAULT_SR, step=1000)
-    duration = st.number_input("Durasi (detik)", min_value=1.0, max_value=30.0, value=float(DEFAULT_DURATION), step=0.5)
-    n_mels = st.number_input("n_mels", min_value=32, max_value=256, value=DEFAULT_N_MELS, step=16)
-    topk = st.slider("Top-K", 1, 10, 5)
+    topk = st.slider("Top Prediction", 1, 10, 5)
     show_spec = st.checkbox("Tampilkan spectrogram", value=True)
+
 
 st.divider()
 
@@ -257,10 +255,11 @@ if audio_file:
             pil_img = audio_to_spectrogram_image(
                 audio_bytes=audio_bytes,
                 file_suffix=suffix,
-                target_sr=int(sr),
-                duration_sec=float(duration),
-                n_mels=int(n_mels),
+                target_sr=DEFAULT_SR,
+                duration_sec=DEFAULT_DURATION,
+                n_mels=DEFAULT_N_MELS,
             )
+
         except Exception as e:
             st.error(f"Gagal membaca audio / membuat spectrogram.\n\nDetail: {e}")
             st.stop()

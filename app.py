@@ -16,8 +16,8 @@ from PIL import Image
 # =========================
 # App config
 # =========================
-st.set_page_config(page_title="Bird Species Detector", layout="centered")
-st.title("🦜 Bird Species Detector (Audio)")
+st.set_page_config(page_title="BirdAI", layout="centered")
+st.title("🦜 BirdAI (Bird Species Detector)")
 
 BASE_DIR = Path(__file__).resolve().parent
 
